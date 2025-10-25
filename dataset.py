@@ -98,3 +98,40 @@ def build_and_save_clean_csvs(train_csv=TRAIN_CSV, val_csv=VAL_CSV, test_csv=TES
     test.reset_index(drop=True).to_parquet(TEST_CLEAN, index=False)
 
     return train, val, test
+
+def print_dataset_stats(train_csv=TRAIN_CSV, val_csv=VAL_CSV, test_csv=TEST_CSV):
+    """Print original row counts, filtered rows, leftover, and final 70/15/15 split sizes."""
+    # Load original CSVs
+    train_df = pd.read_csv(train_csv)
+    val_df = pd.read_csv(val_csv)
+    test_df = pd.read_csv(test_csv)
+    total_original = len(train_df) + len(val_df) + len(test_df)
+
+    print(f"Original row counts: train={len(train_df)}, val={len(val_df)}, test={len(test_df)}")
+    print(f"Total original rows: {total_original}")
+
+    # Apply same cleaning as build_and_save_clean_csvs
+    mega_df = pd.concat([train_df, val_df, test_df], ignore_index=True)
+    mega_df = mega_df.drop(columns=["source", "images_path"], errors="ignore")
+    mega_df = mega_df.dropna()
+    mega_df = mega_df[mega_df["radiology_report"].str.len() <= 1000]
+    mega_df = mega_df[mega_df["layman_report"].str.len() <= 512]
+    mask_png = mega_df["radiology_report"].str.contains(r"\.png", case=False, na=False) | \
+               mega_df["layman_report"].str.contains(r"\.png", case=False, na=False)
+    mega_df = mega_df[~mask_png]
+    mega_df = mega_df[mega_df["radiology_report"] != mega_df["layman_report"]]
+
+    total_after_filter = len(mega_df)
+    filtered_out = total_original - total_after_filter
+    print(f"Rows filtered out: {filtered_out}")
+    print(f"Total rows left after cleaning: {total_after_filter}")
+
+    # Compute 70/15/15 split sizes
+    train_val, test = train_test_split(mega_df, test_size=0.15, random_state=42)
+    train, val = train_test_split(train_val, test_size=0.1765, random_state=42)  # ~0.15/0.85
+
+    print(f"Final split sizes: train={len(train)}, val={len(val)}, test={len(test)}")
+
+
+if __name__ == "__main__":
+    print_dataset_stats()

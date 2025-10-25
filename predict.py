@@ -5,14 +5,15 @@ import torch
 from transformers import T5ForConditionalGeneration, T5Tokenizer
 
 from modules import load_raw_datasets_wrapper
-from my_evaluate import compute_rouge
+from my_utils import compute_rouge
 
 MODEL_PATH = Path("./t5_radiology_finetuned_final")
 
 
 def generate_summary_from_model(report_text: str, model, tokenizer, device: str):
-    """Generate summary using already-loaded model/tokeniser"""
-    prompt = "You are a medical professional, please turn this radiology report into layman report: " + report_text
+    """Generate summary using already-loaded model/tokenizer"""
+    # prompt = "You are a medical professional, please turn this radiology report into layman report: " + report_text
+    prompt = report_text
     inputs = tokenizer(prompt, return_tensors="pt", truncation=True).to(device)
     with torch.no_grad():
         outputs = model.generate(**inputs, max_length=150, num_beams=4, early_stopping=True)

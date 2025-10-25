@@ -13,7 +13,7 @@ TOKENISED_CACHE = Path("data/tokenised")
 
 
 def load_model(model_name="t5-small-local", use_lora=False, device=None):
-    """Load tokenizer and model. Optionally wrap with LoRA."""
+    """Load tokeniser and model. """
     if device is None:
         device = "cuda" if torch.cuda.is_available() else "cpu"
 
