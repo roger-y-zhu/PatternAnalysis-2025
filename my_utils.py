@@ -1,21 +1,29 @@
-"""Helper functions for tokenisation, metrics, text cleaning"""
+"""Utility helpers: ROUGE calculation and text helpers"""
+import ujson
 
-from evaluate import load
+def compute_rouge(preds, labels):
+    """
+    Compute ROUGE for lists of strings.
+    preds: list[str] or single str
+    labels: list[str] or single str
+    Return dict with rouge1/2/L/Lsum
+    """
+    # make lists
+    if isinstance(preds, str):
+        preds = [preds]
+    if isinstance(labels, str):
+        labels = [labels]
 
-
-
-rouge = load("rouge")
-
-def compute_rouge(eval_pred):
-    """Compute ROUGE metrics for summarisation"""
-    preds, labels = eval_pred
+    # lazy import to avoid import cycles
+    from evaluate import load as evaluate_load
+    rouge = evaluate_load("rouge")
     decoded_preds = [p.strip() for p in preds]
     decoded_labels = [l.strip() for l in labels]
     results = rouge.compute(predictions=decoded_preds, references=decoded_labels, use_stemmer=True)
+    # convert to floats
     return {
-        "rouge1": results["rouge1"],
-        "rouge2": results["rouge2"],
-        "rougeL": results["rougeL"],
-        "rougeLsum": results["rougeLsum"],
+        "rouge1": float(results["rouge1"]),
+        "rouge2": float(results["rouge2"]),
+        "rougeL": float(results["rougeL"]),
+        "rougeLsum": float(results["rougeLsum"]),
     }
-

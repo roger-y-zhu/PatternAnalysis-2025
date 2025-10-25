@@ -1,21 +1,27 @@
-"""Defines model wrapper, loading pretrained LLMs (T5)"""
+"""Model + dataset helper functions"""
+from pathlib import Path
+
 import torch
-from transformers import T5Tokenizer, T5ForConditionalGeneration
+from datasets import load_from_disk, DatasetDict
 from peft import LoraConfig, get_peft_model
-import os
+from transformers import T5Tokenizer, T5ForConditionalGeneration
 
-from datasets import load_from_disk
-from dataset import load_datasets, preprocess_dataset
-from datasets import DatasetDict
+# local dataset utilities
+from dataset import load_clean_data, preprocess_dataset, load_raw_datasets
 
-def load_model(model_name="t5-small", use_lora=True, device="cuda"):
-    tokeniser = T5Tokenizer.from_pretrained(model_name)
+TOKENISED_CACHE = Path("data/tokenised")
+
+
+def load_model(model_name="t5-small-local", use_lora=False, device=None):
+    """Load tokenizer and model. Optionally wrap with LoRA."""
+    if device is None:
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    tokenizer = T5Tokenizer.from_pretrained(model_name)
     model = T5ForConditionalGeneration.from_pretrained(model_name)
 
     if use_lora:
-        from peft import LoraConfig, get_peft_model
-
-        lora_config = LoraConfig(
+        lora_cfg = LoraConfig(
             r=8,
             lora_alpha=16,
             target_modules=["q", "v"],
@@ -23,40 +29,48 @@ def load_model(model_name="t5-small", use_lora=True, device="cuda"):
             bias="none",
             task_type="SEQ_2_SEQ_LM"
         )
-        model = get_peft_model(model, lora_config)
-        model.config.use_cache = False  # important for gradient checkpointing
+        model = get_peft_model(model, lora_cfg)
+        model.config.use_cache = False
 
-    model.gradient_checkpointing_enable()  # enable after LoRA
-    if torch.cuda.is_available():
-        model.to(device)
+    model.gradient_checkpointing_enable()
+    model.to(device)
+    return model, tokenizer
 
-    return model, tokeniser
 
-# Path to cached tokenised dataset
-CACHE_DIR = "data/tokenised"
-
-def get_tokenised_datasets(tokeniser):
-    if os.path.exists(CACHE_DIR):
+def get_tokenised_datasets(tokenizer, cache_dir=str(TOKENISED_CACHE), max_input_length=512, max_output_length=256):
+    """Return tokenised HF Datasets for train/val/test. Cache to disk."""
+    cache_dir = Path(cache_dir)
+    if cache_dir.exists():
         print("Loading tokenised datasets from disk...")
-        dataset_dict = load_from_disk(CACHE_DIR)
+        data = load_from_disk(str(cache_dir))
     else:
-        print("Precomputing tokenised datasets...")
-        train_ds, val_ds, test_ds = load_datasets()
+        print("Tokenising cleaned datasets...")
+        hf_ds = load_clean_data(as_hf_dataset=True)
+        # load_clean_data returns single HF Dataset; we saved splits to disk earlier, so load them from parquet:
+        # We will create DatasetDict from parquet splits
+        from datasets import Dataset
+        import pandas as pd
+        train_df = pd.read_parquet("data/train_clean.parquet")
+        val_df = pd.read_parquet("data/val_clean.parquet")
+        test_df = pd.read_parquet("data/test_clean.parquet")
+        train_ds = Dataset.from_pandas(train_df)
+        val_ds = Dataset.from_pandas(val_df)
+        test_ds = Dataset.from_pandas(test_df)
 
-        train_ds = preprocess_dataset(train_ds, tokeniser)
-        val_ds = preprocess_dataset(val_ds, tokeniser)
-        test_ds = preprocess_dataset(test_ds, tokeniser)
+        train_ds = preprocess_dataset(train_ds, tokenizer, max_input_length, max_output_length)
+        val_ds = preprocess_dataset(val_ds, tokenizer, max_input_length, max_output_length)
+        test_ds = preprocess_dataset(test_ds, tokenizer, max_input_length, max_output_length)
 
-        dataset_dict = DatasetDict({
-            "train": train_ds,
-            "val": val_ds,
-            "test": test_ds
-        })
-        dataset_dict.save_to_disk(CACHE_DIR)
-        print(f"Saved tokenised datasets to {CACHE_DIR}")
+        data = DatasetDict({"train": train_ds, "val": val_ds, "test": test_ds})
+        data.save_to_disk(str(cache_dir))
+        print(f"Saved tokenised datasets to {cache_dir}")
 
-    # Convert to PyTorch tensors for faster DataLoader iteration
-    for split in dataset_dict:
-        dataset_dict[split] = dataset_dict[split].with_format("torch")
+    # set torch format
+    for split in data:
+        data[split] = data[split].with_format("torch")
+    return data["train"], data["val"], data["test"]
 
-    return dataset_dict["train"], dataset_dict["val"], dataset_dict["test"]
+
+def load_raw_datasets_wrapper():
+    """Return raw train/val/test pandas DataFrames (for eval/predict)."""
+    return load_raw_datasets()

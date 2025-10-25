@@ -1,7 +1,6 @@
+"""Train T5-small on cleaned data"""
 from pathlib import Path
-
 import torch
-from datasets import Dataset
 from transformers import (
     T5ForConditionalGeneration,
     T5Tokenizer,
@@ -9,62 +8,54 @@ from transformers import (
     TrainingArguments,
     DataCollatorForSeq2Seq
 )
+from modules import get_tokenised_datasets, load_model
+import evaluate
+import numpy as np
 
-from my_utils import compute_rouge
-
-
-def load_clean_parquet(path, tokenizer, max_input_length=512, max_output_length=256):
-    """Load cleaned parquet file and tokenize it for T5"""
-    import pandas as pd
-    df = pd.read_parquet(path)
-    dataset = Dataset.from_pandas(df)
-
-    def preprocess(batch):
-        inputs = [
-            "You are a medical professional, please turn this radiology report into layman report: " + r
-            for r in batch["radiology_report"]
-        ]
-        model_inputs = tokenizer(
-            inputs,
-            max_length=max_input_length,
-            truncation=True,
-            padding="max_length"
-        )
-        labels = tokenizer(
-            text_target=batch["layman_report"],
-            max_length=max_output_length,
-            truncation=True,
-            padding="max_length"
-        )
-        model_inputs["labels"] = labels["input_ids"]
-        return model_inputs
-
-    return dataset.map(preprocess, batched=True, remove_columns=dataset.column_names)
+CHECKPOINT = Path("./t5_radiology_finetuned_final")
+MODEL_NAME = "t5-small-local"
 
 def main():
-    checkpoint_path = Path("./t5_radiology_finetuned_final")
-    tokenizer = T5Tokenizer.from_pretrained("t5-small-local")
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    tokenizer = T5Tokenizer.from_pretrained(MODEL_NAME)
 
-    # Load and preprocess cleaned datasets
-    train_ds = load_clean_parquet("data/train_clean.parquet", tokenizer)
-    val_ds = load_clean_parquet("data/val_clean.parquet", tokenizer)
+    train_ds, val_ds, _ = get_tokenised_datasets(tokenizer)
 
-    # Load or initialize model
-    try:
-        model = T5ForConditionalGeneration.from_pretrained(str(checkpoint_path)).to("cuda" if torch.cuda.is_available() else "cpu")
-        print("Loaded fine-tuned model. Skipping training.")
-        return
-    except Exception:
-        print("Fine-tuned model not found. Training base model.")
-        model = T5ForConditionalGeneration.from_pretrained("t5-small-local").to("cuda" if torch.cuda.is_available() else "cpu")
+    # try load existing checkpoint
+    if CHECKPOINT.exists():
+        try:
+            model = T5ForConditionalGeneration.from_pretrained(str(CHECKPOINT)).to(device)
+            print("Loaded existing fine-tuned model. Exiting.")
+            return
+        except Exception:
+            print("Failed loading existing checkpoint. Will train from base model.")
 
+    model = T5ForConditionalGeneration.from_pretrained(MODEL_NAME).to(device)
     data_collator = DataCollatorForSeq2Seq(tokenizer, model=model)
 
+    rouge = evaluate.load("rouge")
+
+    def compute_metrics(eval_pred):
+        """Decode predictions/labels and compute ROUGE"""
+        preds_ids = eval_pred.predictions
+        # when using generate, HF may return a tuple
+        if isinstance(preds_ids, tuple):
+            preds_ids = preds_ids[0]
+        decoded_preds = tokenizer.batch_decode(preds_ids, skip_special_tokens=True)
+        labels_ids = eval_pred.label_ids
+        # replace -100 in labels as pad token id
+        labels_ids = np.where(labels_ids == -100, tokenizer.pad_token_id, labels_ids)
+        decoded_labels = tokenizer.batch_decode(labels_ids, skip_special_tokens=True)
+        results = rouge.compute(predictions=[p.strip() for p in decoded_preds],
+                                references=[l.strip() for l in decoded_labels],
+                                use_stemmer=True)
+        # return scalars
+        return {k: float(v) for k, v in results.items()}
+
     training_args = TrainingArguments(
-        output_dir=str(checkpoint_path),
+        output_dir=str(CHECKPOINT),
         per_device_train_batch_size=8,
         per_device_eval_batch_size=2,
-        eval_accumulation_steps=8,
         gradient_accumulation_steps=2,
         learning_rate=5e-5,
         num_train_epochs=3,
@@ -72,7 +63,8 @@ def main():
         logging_steps=200,
         save_strategy="epoch",
         report_to="none",
-        dataloader_num_workers=0
+        dataloader_num_workers=0,
+        save_total_limit=2
     )
 
     trainer = Trainer(
@@ -81,13 +73,15 @@ def main():
         train_dataset=train_ds,
         eval_dataset=val_ds,
         data_collator=data_collator,
-        compute_metrics=compute_rouge
+        tokenizer=tokenizer,
+        compute_metrics=compute_metrics
     )
 
     trainer.train()
-    trainer.save_model(str(checkpoint_path))
-    tokenizer.save_pretrained(str(checkpoint_path))
+    trainer.save_model(str(CHECKPOINT))
+    tokenizer.save_pretrained(str(CHECKPOINT))
     print("✅ Training complete and model saved.")
+
 
 if __name__ == "__main__":
     main()
